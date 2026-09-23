@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Run kami development commands in rust:1.90-bookworm without a host toolchain.
+# Usage: ./hako cargo test; ./hako cargo clippy --all-targets -- -D warnings
+#        ./hako cargo build --release; ./hako cargo run -- tui --demo
+# For fmt/clippy: ./hako --setup-tools (copies the image toolchain into .devhome).
+# No ports are published: kami is a terminal client, not a development server.
+# The container's localhost is isolated; run target/release/kami on the host
+# when connecting to a host-local controller or controlling systemd.
+set -Eeuo pipefail
+
+readonly IMAGE="${HAKO_IMAGE:-rust:1.90-bookworm}"
+readonly HAKO_BIND_HOST="${HAKO_BIND_HOST:-127.0.0.1}"
+
+main() {
+    if [[ $# -eq 0 || ${1:-} == --help ]]; then
+        printf 'Usage: ./hako COMMAND [ARGS...]\nNo host ports are published.\n'
+        return 0
+    fi
+    local dependency repo_root
+    for dependency in docker id mkdir; do
+        command -v "${dependency}" >/dev/null || { printf 'Missing command: %s\n' "${dependency}" >&2; return 127; }
+    done
+    repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+    printf '#1 [hako cache] mkdir -p %q\n' "${repo_root}/.devhome" >&2
+    mkdir -p -- "${repo_root}/.devhome"
+    local -a tty_flags=()
+    [[ ! -t 0 ]] || tty_flags+=(-i)
+    [[ ! -t 0 || ! -t 1 ]] || tty_flags+=(-t)
+    local rustup_home=/usr/local/rustup
+    [[ ! -d "${repo_root}/.devhome/rustup" ]] || rustup_home=/app/.devhome/rustup
+    if [[ ${1:-} == --setup-tools ]]; then
+        set -- sh -c 'if [ ! -d /app/.devhome/rustup ]; then cp -a /usr/local/rustup /app/.devhome/rustup; fi; RUSTUP_HOME=/app/.devhome/rustup rustup component add rustfmt clippy'
+    fi
+    local -a command=(docker run --rm "${tty_flags[@]}"
+        --user "$(id -u):$(id -g)"
+        -e HOME=/app/.devhome -e CARGO_HOME=/app/.devhome/cargo
+        -e RUSTUP_HOME="${rustup_home}" -e TERM="${TERM:-xterm-256color}"
+        -v "${repo_root}:/app" -w /app
+        --label "hako.repo=${repo_root}" --label hako.scope=manual --label hako.service=
+        "${IMAGE}" "$@")
+    printf '#2 [hako run] ' >&2
+    printf '%q ' "${command[@]}" >&2
+    printf '\n' >&2
+    exec "${command[@]}"
+}
+
+main "$@"

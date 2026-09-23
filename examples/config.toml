@@ -1,0 +1,9 @@
+# Copy to ~/.config/kami/config.toml and restrict permissions to 0600.
+controller = "http://127.0.0.1:9090"
+timeout = 5
+# Prefer KAMI_SECRET when the configuration file is shared or versioned.
+# secret = "replace-with-your-controller-secret"
+
+[connections]
+# Add PROCESS alongside the default DESTINATION and ROUTE columns.
+show_process = false

@@ -10,3 +10,11 @@ compile_commands.json
 CTestTestfile.cmake
 _deps
 CMakeUserPresets.json
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+build/
+dist/
+target/
+.devhome/

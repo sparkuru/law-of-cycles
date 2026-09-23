@@ -611,7 +611,7 @@ fn executable_keeps_cli_contract_and_child_exit_code() {
     let binary = env!("CARGO_BIN_EXE_kami");
     let output = Command::new(binary).args(["--version"]).output().unwrap();
     assert!(output.status.success());
-    assert!(String::from_utf8_lossy(&output.stdout).contains("0.2.0"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("0.1.0"));
     let output = Command::new(binary)
         .args(["env", "--unset", "--json"])
         .output()

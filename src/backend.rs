@@ -30,7 +30,7 @@ impl Backend {
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(settings.timeout)
-            .user_agent("kami/0.1.0")
+            .user_agent("kami/0.2.0")
             .build()
             .context("Cannot initialize HTTP client")?;
         Ok(Self {

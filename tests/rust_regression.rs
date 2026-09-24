@@ -376,6 +376,18 @@ async fn executable_connects_using_mihomo_yaml_without_modifying_it() {
     let mut fixture = Fixture::new(vec![
         Reply::json(200, json!({"version": "yaml-fixture"})),
         Reply::json(200, json!({"mode": "rule", "tun": {"enable": false}})),
+        Reply::json(
+            200,
+            json!({"proxies": {
+                "Proxy": {"type":"Selector","all":["Tokyo"],"now":"Tokyo"},
+                "Tokyo": {"type":"Trojan","history":[{"delay":38}]}
+            }}),
+        ),
+        Reply {
+            status: 200,
+            body: b"{\"up\":1200,\"down\":3400}\n".to_vec(),
+            headers: String::new(),
+        },
     ])
     .await;
     let path = std::env::temp_dir().join(format!("kami-cli-yaml-{}.yaml", std::process::id()));
@@ -385,12 +397,7 @@ async fn executable_connects_using_mihomo_yaml_without_modifying_it() {
     );
     std::fs::write(&path, &text).unwrap();
     let result = tokio::process::Command::new(env!("CARGO_BIN_EXE_kami"))
-        .args([
-            "--mihomo-config",
-            path.to_str().unwrap(),
-            "--json",
-            "status",
-        ])
+        .args(["-c", path.to_str().unwrap(), "--json", "status"])
         .env_remove("KAMI_CONTROLLER")
         .env_remove("KAMI_SECRET")
         .env_remove("KAMI_TIMEOUT")
@@ -407,8 +414,13 @@ async fn executable_connects_using_mihomo_yaml_without_modifying_it() {
     );
     let output = String::from_utf8(result.stdout).unwrap();
     assert!(output.contains("yaml-fixture"));
+    let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(value["selected"]["Proxy"]["node"], "Tokyo");
+    assert_eq!(value["selected"]["Proxy"]["delay_ms"], 38);
+    assert_eq!(value["traffic"]["up"], 1200);
+    assert_eq!(value["traffic"]["down"], 3400);
     assert!(!output.contains("yaml-test-token"));
-    for _ in 0..2 {
+    for _ in 0..4 {
         assert!(
             fixture
                 .requests

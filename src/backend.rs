@@ -216,6 +216,33 @@ impl Backend {
         }))
         .context("Invalid core configuration response")
     }
+    pub async fn traffic_sample(&self) -> Result<Traffic> {
+        let (tx, mut rx) = mpsc::channel(1);
+        let backend = self.clone();
+        let task = tokio::spawn(async move {
+            let mut backoff = 1;
+            if let Err(error) = backend
+                .stream_once(Topic::Traffic, "info", &tx, &mut backoff)
+                .await
+            {
+                let _ = tx
+                    .send(Update::Error(Topic::Traffic, error.to_string()))
+                    .await;
+            }
+        });
+        let result =
+            tokio::time::timeout(self.settings.timeout.max(Duration::from_secs(2)), rx.recv())
+                .await;
+        task.abort();
+        match result
+            .context("Traffic sample timed out")?
+            .context("Traffic stream closed")?
+        {
+            Update::Data(Topic::Traffic, Data::Traffic(traffic)) => Ok(traffic),
+            Update::Error(Topic::Traffic, error) => bail!("Traffic sample unavailable: {error}"),
+            _ => bail!("Unexpected traffic stream response"),
+        }
+    }
     pub async fn fetch(&self, topic: Topic) -> Result<Data> {
         Ok(match topic {
             Topic::Status => Data::Status(self.status().await?),

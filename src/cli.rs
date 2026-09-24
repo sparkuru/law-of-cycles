@@ -1,12 +1,15 @@
 use crate::{backend::Backend, config::Settings, model::*, system, tui};
 use anyhow::{Context, Result, ensure};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
+    collections::{BTreeMap, BTreeSet},
     io::{self, IsTerminal, Write},
     path::PathBuf,
 };
 use tokio::sync::mpsc;
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -16,18 +19,12 @@ use tokio::sync::mpsc;
 )]
 pub struct Cli {
     #[arg(
+        short = 'c',
         long,
         global = true,
         help = "Read kami TOML or Mihomo YAML (.yaml/.yml)"
     )]
     pub config: Option<PathBuf>,
-    #[arg(
-        long,
-        global = true,
-        conflicts_with = "config",
-        help = "Read connection settings from a Mihomo YAML file"
-    )]
-    pub mihomo_config: Option<PathBuf>,
     #[arg(
         long,
         global = true,
@@ -50,7 +47,7 @@ pub enum Command {
         #[arg(long, help = "Use sample data without network or host effects")]
         demo: bool,
     },
-    /// Show core version, routing mode and TUN state
+    /// Show core state, selected nodes and current network I/O
     Status,
     /// List proxies and groups
     Proxies {
@@ -135,11 +132,7 @@ impl LogLevel {
 
 impl Cli {
     pub async fn run(self) -> Result<()> {
-        if self.command.is_none()
-            && self.config.is_none()
-            && self.mihomo_config.is_none()
-            && self.controller.is_none()
-        {
+        if self.command.is_none() && self.config.is_none() && self.controller.is_none() {
             Cli::command().print_help()?;
             return Ok(());
         }
@@ -176,7 +169,6 @@ impl Cli {
         } else {
             Backend::new(Settings::load(
                 self.config,
-                self.mihomo_config,
                 self.controller,
                 self.timeout,
                 matches!(command, Command::Tui { .. }),
@@ -195,19 +187,28 @@ impl Cli {
                 return tui::run(backend).await;
             }
             Command::Status => {
-                return emit(serde_json::to_value(backend.status().await?)?, self.json);
+                return show_status(&backend, self.json).await;
             }
             Command::Proxies { search } => {
                 let raw = backend.get(&["proxies"]).await?;
                 let proxies = raw["proxies"]
                     .as_object()
                     .context("Invalid proxies response")?;
-                let filtered: serde_json::Map<_, _> = proxies
-                    .iter()
-                    .filter(|(name, _)| name.to_lowercase().contains(&search.to_lowercase()))
-                    .map(|(name, value)| (name.clone(), value.clone()))
-                    .collect();
-                return emit(Value::Object(filtered), self.json);
+                if self.json {
+                    let filtered: serde_json::Map<_, _> = proxies
+                        .iter()
+                        .filter(|(name, _)| name.to_lowercase().contains(&search.to_lowercase()))
+                        .map(|(name, value)| (name.clone(), value.clone()))
+                        .collect();
+                    return emit(Value::Object(filtered), true);
+                }
+                let groups: Proxies = serde_json::from_value(Value::Object(proxies.clone()))
+                    .context("Invalid proxies response")?;
+                let color = io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+                for row in proxy_tree_lines(&groups, &search, color) {
+                    line(&row)?;
+                }
+                return Ok(());
             }
             Command::Connections => return emit(backend.get(&["connections"]).await?, self.json),
             Command::Providers => {
@@ -231,6 +232,183 @@ impl Cli {
         };
         emit(backend.execute(&operation).await?, self.json)
     }
+}
+#[derive(Serialize)]
+struct SelectedNode {
+    node: String,
+    delay_ms: Option<u64>,
+}
+
+async fn show_status(backend: &Backend, machine: bool) -> Result<()> {
+    let status = backend.status().await?;
+    let (selected, selected_error) = match backend.fetch(Topic::Proxies).await {
+        Ok(Data::Proxies(proxies)) => (
+            proxies
+                .iter()
+                .filter(|(_, proxy)| proxy.all.is_some() && !proxy.now.is_empty())
+                .map(|(group, proxy)| {
+                    (
+                        group.clone(),
+                        SelectedNode {
+                            node: proxy.now.clone(),
+                            delay_ms: proxy_delay(&proxies, &proxy.now),
+                        },
+                    )
+                })
+                .collect::<BTreeMap<_, _>>(),
+            None,
+        ),
+        Ok(_) => unreachable!(),
+        Err(error) => (BTreeMap::new(), Some(clean(&error.to_string()))),
+    };
+    let (traffic, traffic_error) = match backend.traffic_sample().await {
+        Ok(traffic) => (Some(traffic), None),
+        Err(error) => (None, Some(clean(&error.to_string()))),
+    };
+    if machine {
+        let mut value = serde_json::to_value(status)?;
+        value["selected"] = serde_json::to_value(selected)?;
+        value["traffic"] = serde_json::to_value(traffic)?;
+        if let Some(error) = selected_error {
+            value["selected_error"] = json!(error);
+        }
+        if let Some(error) = traffic_error {
+            value["traffic_error"] = json!(error);
+        }
+        return emit(value, true);
+    }
+    emit(serde_json::to_value(status)?, false)?;
+    line("selected nodes:")?;
+    if let Some(error) = selected_error {
+        line(&format!("  unavailable: {error}"))?;
+    } else if selected.is_empty() {
+        line("  none")?;
+    } else {
+        let color = io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+        for (group, node) in selected {
+            let group = latency_color(&clean(&group), node.delay_ms, color);
+            let name = latency_color(&clean(&node.node), node.delay_ms, color);
+            let delay = node
+                .delay_ms
+                .map(|value| format!(" ({value} ms)"))
+                .unwrap_or_default();
+            line(&format!("  {group}: {name}{delay}"))?;
+        }
+    }
+    match traffic {
+        Some(traffic) => line(&format!(
+            "network I/O: download {}/s, upload {}/s",
+            bytes(traffic.down),
+            bytes(traffic.up)
+        )),
+        None => line(&format!(
+            "network I/O: unavailable ({})",
+            traffic_error.unwrap_or_default()
+        )),
+    }
+}
+
+fn proxy_delay(proxies: &Proxies, name: &str) -> Option<u64> {
+    let mut current = name;
+    let mut visited = BTreeSet::new();
+    loop {
+        if !visited.insert(current) {
+            return None;
+        }
+        let proxy = proxies.get(current)?;
+        if proxy.all.is_some() && !proxy.now.is_empty() {
+            current = &proxy.now;
+            continue;
+        }
+        return proxy
+            .history
+            .last()
+            .map(|entry| entry.delay)
+            .filter(|delay| *delay > 0);
+    }
+}
+
+fn latency_color(text: &str, delay: Option<u64>, enabled: bool) -> String {
+    if !enabled {
+        return text.into();
+    }
+    let code = match delay {
+        Some(1..=100) => 32,
+        Some(101..=300) => 33,
+        Some(_) => 31,
+        None => 90,
+    };
+    format!("\u{1b}[{code}m{text}\u{1b}[0m")
+}
+
+fn proxy_tree_lines(proxies: &Proxies, search: &str, color: bool) -> Vec<String> {
+    let search = search.to_lowercase();
+    let groups: Vec<_> = proxies
+        .iter()
+        .filter_map(|(name, proxy)| {
+            let all = proxy.all.as_ref()?;
+            let group_matches = name.to_lowercase().contains(&search);
+            let nodes: Vec<_> = all
+                .iter()
+                .filter(|node| group_matches || node.to_lowercase().contains(&search))
+                .collect();
+            if !search.is_empty() && !group_matches && nodes.is_empty() {
+                None
+            } else {
+                Some((name, proxy, nodes))
+            }
+        })
+        .collect();
+    if groups.is_empty() {
+        return vec!["No matching proxy groups or nodes.".into()];
+    }
+    let width = groups
+        .iter()
+        .flat_map(|(_, _, nodes)| nodes.iter())
+        .map(|node| UnicodeWidthStr::width(format!("├── {}", clean(node)).as_str()))
+        .max()
+        .unwrap_or(0)
+        .max(UnicodeWidthStr::width("GROUP / NODE"));
+    let mut rows = vec![format!(
+        "{}  {:>8}  SELECTED",
+        format!(
+            "GROUP / NODE{}",
+            " ".repeat(width - UnicodeWidthStr::width("GROUP / NODE"))
+        ),
+        "LATENCY"
+    )];
+    for (group, proxy, nodes) in groups {
+        let delay = proxy_delay(proxies, &proxy.now);
+        rows.push(format!("{}:", latency_color(&clean(group), delay, color)));
+        for (index, node) in nodes.iter().enumerate() {
+            let branch = if index + 1 == nodes.len() {
+                "└──"
+            } else {
+                "├──"
+            };
+            let name = clean(node);
+            let delay = proxy_delay(proxies, node);
+            let selected = proxy.now == **node;
+            let label = format!("{branch} {name}");
+            let padding = " ".repeat(width.saturating_sub(UnicodeWidthStr::width(label.as_str())));
+            let name = if selected {
+                latency_color(&name, delay, color)
+            } else {
+                name
+            };
+            let latency = delay
+                .map(|value| format!("{value} ms"))
+                .unwrap_or_else(|| "—".into());
+            let latency = latency_color(&format!("{latency:>8}"), delay, color);
+            let marker = if selected {
+                latency_color("●", delay, color)
+            } else {
+                String::new()
+            };
+            rows.push(format!("{branch} {name}{padding}  {latency}  {marker}"));
+        }
+    }
+    rows
 }
 fn emit_env(proxy: &str, machine: bool) -> Result<()> {
     let env = system::proxy_environment(proxy)?;
@@ -285,6 +463,33 @@ async fn follow(backend: Backend, topic: Topic, level: String, machine: bool) ->
 mod tests {
     use super::*;
     #[test]
+    fn proxy_tree_shows_group_context_latency_and_selection() {
+        let proxies: Proxies = serde_json::from_value(json!({
+            "Proxy": {"type":"Selector","all":["Fast","Slow"],"now":"Fast"},
+            "Fast": {"type":"Trojan","history":[{"delay":42}]},
+            "Slow": {"type":"Trojan","history":[{"delay":350}]}
+        }))
+        .unwrap();
+        let rows = proxy_tree_lines(&proxies, "", false);
+        assert!(rows[0].contains("LATENCY  SELECTED"));
+        assert_eq!(rows[1], "Proxy:");
+        assert!(rows[2].contains("├── Fast"));
+        assert!(rows[2].contains("42 ms"));
+        assert!(rows[2].contains("●"));
+        assert!(rows[3].contains("└── Slow"));
+        assert!(rows[3].contains("350 ms"));
+        assert!(!rows[3].contains("●"));
+        let filtered = proxy_tree_lines(&proxies, "slow", false).join("\n");
+        assert!(filtered.contains("Proxy:"));
+        assert!(filtered.contains("Slow"));
+        assert!(!filtered.contains("Fast"));
+        let colored = proxy_tree_lines(&proxies, "", true).join("\n");
+        assert!(colored.contains("\u{1b}[32mProxy\u{1b}[0m:"));
+        assert!(colored.contains("\u{1b}[32mFast\u{1b}[0m"));
+        assert!(colored.contains("\u{1b}[31m  350 ms\u{1b}[0m"));
+    }
+
+    #[test]
     fn parser_preserves_exec_arguments_and_global_options() {
         let cli = Cli::try_parse_from([
             "kami",
@@ -306,17 +511,8 @@ mod tests {
                 .json
         );
         assert!(Cli::try_parse_from(["kami", "--secret", "hidden"]).is_err());
-        let cli = Cli::try_parse_from(["kami", "status", "--mihomo-config", "core.conf"]).unwrap();
-        assert_eq!(cli.mihomo_config, Some(PathBuf::from("core.conf")));
-        assert!(
-            Cli::try_parse_from([
-                "kami",
-                "--config",
-                "kami.toml",
-                "--mihomo-config",
-                "core.yaml"
-            ])
-            .is_err()
-        );
+        let cli = Cli::try_parse_from(["kami", "status", "-c", "core.yaml"]).unwrap();
+        assert_eq!(cli.config, Some(PathBuf::from("core.yaml")));
+        assert!(Cli::try_parse_from(["kami", "--mihomo-config", "core.yaml"]).is_err());
     }
 }

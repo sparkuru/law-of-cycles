@@ -117,14 +117,12 @@ impl Settings {
 
     pub fn load(
         path: Option<PathBuf>,
-        mihomo_path: Option<PathBuf>,
         controller: Option<String>,
         timeout: Option<f64>,
         require_controller: bool,
     ) -> Result<Self> {
         Self::load_with(
             path,
-            mihomo_path,
             controller,
             timeout,
             &env::vars().collect(),
@@ -134,19 +132,13 @@ impl Settings {
 
     fn load_with(
         path: Option<PathBuf>,
-        mihomo_path: Option<PathBuf>,
         controller: Option<String>,
         timeout: Option<f64>,
         env: &HashMap<String, String>,
         require_controller: bool,
     ) -> Result<Self> {
-        ensure!(
-            path.is_none() || mihomo_path.is_none(),
-            "Choose either --config or --mihomo-config"
-        );
-        let explicit = path.is_some() || mihomo_path.is_some();
-        let force_yaml = mihomo_path.is_some();
-        let path = mihomo_path.or(path).unwrap_or_else(|| {
+        let explicit = path.is_some();
+        let path = path.unwrap_or_else(|| {
             let root = env
                 .get("XDG_CONFIG_HOME")
                 .map(PathBuf::from)
@@ -154,15 +146,20 @@ impl Settings {
                     PathBuf::from(env.get("HOME").map(String::as_str).unwrap_or("."))
                         .join(".config")
                 });
-            root.join("kami/config.toml")
+            let directory = root.join("kami");
+            ["config.toml", "config.yaml", "config.yml"]
+                .into_iter()
+                .map(|name| directory.join(name))
+                .find(|candidate| candidate.exists())
+                .unwrap_or_else(|| directory.join("config.toml"))
         });
-        let yaml = force_yaml
-            || path
-                .extension()
-                .and_then(|value| value.to_str())
-                .is_some_and(|value| {
-                    value.eq_ignore_ascii_case("yaml") || value.eq_ignore_ascii_case("yml")
-                });
+        let format_path = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        let yaml = format_path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| {
+                value.eq_ignore_ascii_case("yaml") || value.eq_ignore_ascii_case("yml")
+            });
         let file: FileSettings = match fs::File::open(path) {
             Ok(file) => {
                 let mut text = String::new();
@@ -248,15 +245,8 @@ mod tests {
             "yaml",
             "external-controller: 0.0.0.0:9090\nsecret: 'test # secret'\nproxies: []\nrules: [MATCH,DIRECT]\n",
         );
-        let settings = Settings::load_with(
-            Some(file.0.clone()),
-            None,
-            None,
-            None,
-            &HashMap::new(),
-            false,
-        )
-        .unwrap();
+        let settings =
+            Settings::load_with(Some(file.0.clone()), None, None, &HashMap::new(), false).unwrap();
         assert_eq!(settings.controller.as_str(), "http://127.0.0.1:9090/");
         assert_eq!(settings.secret, "test # secret");
         assert_eq!(settings.timeout.as_secs(), 5);
@@ -294,9 +284,9 @@ mod tests {
     }
 
     #[test]
-    fn explicit_yaml_file_supports_any_extension_and_overrides() {
+    fn explicit_yaml_file_and_overrides() {
         let file = ConfigFile::new(
-            "conf",
+            "yaml",
             "external-controller: ':9090'\nsecret: file-secret\n",
         );
         let env = HashMap::from([
@@ -305,7 +295,6 @@ mod tests {
             ("KAMI_TIMEOUT".into(), "4".into()),
         ]);
         let settings = Settings::load_with(
-            None,
             Some(file.0.clone()),
             Some("http://localhost:3333".into()),
             Some(6.0),
@@ -316,10 +305,62 @@ mod tests {
         assert_eq!(settings.controller.port(), Some(3333));
         assert_eq!(settings.secret, "env-secret");
         assert_eq!(settings.timeout.as_secs(), 6);
-        let settings =
-            Settings::load_with(None, Some(file.0.clone()), None, None, &env, false).unwrap();
+        let settings = Settings::load_with(Some(file.0.clone()), None, None, &env, false).unwrap();
         assert_eq!(settings.controller.port(), Some(2222));
         assert_eq!(settings.timeout.as_secs(), 4);
+    }
+
+    #[test]
+    fn toml_named_symlink_to_yaml_uses_target_format() {
+        let target = ConfigFile::new(
+            "yaml",
+            "external-controller: ':9091'\nsecret: symlink-secret\n",
+        );
+        let link = ConfigFile::new("toml", "");
+        fs::remove_file(&link.0).unwrap();
+        std::os::unix::fs::symlink(&target.0, &link.0).unwrap();
+
+        let settings =
+            Settings::load_with(Some(link.0.clone()), None, None, &HashMap::new(), false).unwrap();
+        assert_eq!(settings.controller.port(), Some(9091));
+        assert_eq!(settings.secret, "symlink-secret");
+    }
+
+    #[test]
+    fn default_config_uses_yaml_when_toml_is_absent() {
+        let root = env::temp_dir().join(format!(
+            "kami-default-config-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let directory = root.join("kami");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("config.yaml"),
+            "external-controller: ':9091'\nsecret: yaml-secret\n",
+        )
+        .unwrap();
+        let environment = HashMap::from([(
+            "XDG_CONFIG_HOME".into(),
+            root.to_string_lossy().into_owned(),
+        )]);
+
+        let settings = Settings::load_with(None, None, None, &environment, false).unwrap();
+        assert_eq!(settings.controller.port(), Some(9091));
+        assert_eq!(settings.secret, "yaml-secret");
+
+        fs::write(
+            directory.join("config.toml"),
+            "controller = 'http://localhost:9092'\nsecret = 'toml-secret'\n",
+        )
+        .unwrap();
+        let settings = Settings::load_with(None, None, None, &environment, false).unwrap();
+        assert_eq!(settings.controller.port(), Some(9092));
+        assert_eq!(settings.secret, "toml-secret");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -329,19 +370,10 @@ mod tests {
             "external-controller-unix: /tmp/mihomo.sock\nsecret: test-secret\n",
         );
         assert!(
-            Settings::load_with(
-                Some(file.0.clone()),
-                None,
-                None,
-                None,
-                &HashMap::new(),
-                false
-            )
-            .is_err()
+            Settings::load_with(Some(file.0.clone()), None, None, &HashMap::new(), false).is_err()
         );
         let settings = Settings::load_with(
             Some(file.0.clone()),
-            None,
             Some("http://localhost:9090".into()),
             None,
             &HashMap::new(),
@@ -376,15 +408,8 @@ mod tests {
             "toml",
             "controller = 'http://localhost:9091'\nsecret = 'toml-secret'\ntimeout = 3\n",
         );
-        let settings = Settings::load_with(
-            Some(file.0.clone()),
-            None,
-            None,
-            None,
-            &HashMap::new(),
-            false,
-        )
-        .unwrap();
+        let settings =
+            Settings::load_with(Some(file.0.clone()), None, None, &HashMap::new(), false).unwrap();
         assert_eq!(settings.controller.port(), Some(9091));
         assert_eq!(settings.secret, "toml-secret");
         assert_eq!(settings.timeout.as_secs(), 3);
@@ -393,15 +418,8 @@ mod tests {
     #[test]
     fn connection_process_column_is_opt_in() {
         let file = ConfigFile::new("toml", "[connections]\nshow_process = true\n");
-        let settings = Settings::load_with(
-            Some(file.0.clone()),
-            None,
-            None,
-            None,
-            &HashMap::new(),
-            false,
-        )
-        .unwrap();
+        let settings =
+            Settings::load_with(Some(file.0.clone()), None, None, &HashMap::new(), false).unwrap();
         assert!(settings.connections.show_process);
         assert!(toml::from_str::<FileSettings>("[connections]\nshow_process = 'true'\n").is_err());
         assert!(toml::from_str::<FileSettings>("[connections]\nprocess = true\n").is_err());
@@ -433,7 +451,6 @@ mod tests {
         ]);
         let settings = Settings::load_with(
             None,
-            None,
             Some("http://localhost:3333".into()),
             Some(6.0),
             &env,
@@ -448,22 +465,14 @@ mod tests {
     #[test]
     fn tui_requires_a_configured_controller() {
         let file = ConfigFile::new("toml", "secret = 'file-secret'\n");
-        let error = Settings::load_with(
-            Some(file.0.clone()),
-            None,
-            None,
-            None,
-            &HashMap::new(),
-            true,
-        )
-        .err()
-        .unwrap()
-        .to_string();
+        let error = Settings::load_with(Some(file.0.clone()), None, None, &HashMap::new(), true)
+            .err()
+            .unwrap()
+            .to_string();
         assert!(error.contains("TUI needs a controller"));
 
         let settings = Settings::load_with(
             Some(file.0.clone()),
-            None,
             Some("http://localhost:9090".into()),
             None,
             &HashMap::new(),
@@ -473,6 +482,6 @@ mod tests {
         assert_eq!(settings.secret, "file-secret");
 
         let env = HashMap::from([("KAMI_CONTROLLER".into(), "http://localhost:9091".into())]);
-        assert!(Settings::load_with(None, None, None, None, &env, true).is_ok());
+        assert!(Settings::load_with(None, None, None, &env, true).is_ok());
     }
 }

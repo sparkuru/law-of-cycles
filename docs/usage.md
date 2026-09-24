@@ -30,8 +30,8 @@ Use a target-native build for other architectures.
 Optionally copy `target/release/kami` into a directory on your PATH. The remaining
 examples use `kami`; substitute `./target/release/kami` when running from the
 repository. With no subcommand or explicit connection flags, kami prints help
-(even when environment/default-file settings exist). Supplying `--config`,
-`--mihomo-config` or `--controller` without a subcommand opens the TUI when a
+(even when environment/default-file settings exist). Supplying `-c`/`--config`
+or `--controller` without a subcommand opens the TUI when a
 controller is configured.
 Explicit `kami tui` uses environment/default-file settings, but needs a
 controller from a flag, environment variable or file before opening the terminal.
@@ -53,12 +53,13 @@ kami --controller http://127.0.0.1:9090 status
 
 Mihomo must already be running with `external-controller` configured. The TUI
 does not assume a controller address; one-shot CLI commands retain the
-`http://127.0.0.1:9090` default. Copy `examples/config.toml` to
-`~/.config/kami/config.toml` (or `$XDG_CONFIG_HOME/kami/config.toml`) and set file
-permissions to `0600` if it contains the controller secret. `--config PATH`
+`http://127.0.0.1:9090` default. Kami looks for `config.toml`, then
+`config.yaml`, then `config.yml` under `~/.config/kami/` (or `$XDG_CONFIG_HOME/kami/`).
+Copy `examples/config.toml` there if you need a kami TOML file, and set file
+permissions to `0600` if it contains the controller secret. `-c PATH` or `--config PATH`
 selects a different file. The file is never rewritten by kami.
 
-Precedence: flags > `KAMI_CONTROLLER` / `KAMI_TIMEOUT` / `KAMI_SECRET` > TOML
+Precedence: flags > `KAMI_CONTROLLER` / `KAMI_TIMEOUT` / `KAMI_SECRET` > configuration file
 > defaults. A controller can legitimately have no secret; set `KAMI_SECRET` or
 put `secret` in the file when yours requires one. The secret has no command-line
 flag to avoid putting it in process arguments. Export it from your secret
@@ -69,15 +70,15 @@ Controller requests bypass ambient HTTP proxy variables.
 ### Read the core's existing YAML
 
 ```console
-kami --mihomo-config /path/to/mihomo.yaml
-kami --mihomo-config /path/to/mihomo.yaml status
+kami -c /path/to/mihomo.yaml
+kami -c /path/to/mihomo.yaml status
 kami --config /path/to/mihomo.yaml --json status
 ```
 
-`--mihomo-config` explicitly selects YAML regardless of the filename extension.
-`--config` detects `.yaml` / `.yml` (case-insensitive); other extensions retain
-the kami TOML format. The two flags are mutually exclusive. An explicitly
-selected file replaces the default kami TOML; the files are not merged.
+`-c`/`--config` detects `.yaml` / `.yml` (case-insensitive); other extensions use
+the kami TOML format. An explicitly selected file replaces the default
+configuration; the files are not merged. For a symbolic link, the target file's extension
+determines the format.
 
 kami reads the top-level `external-controller`, `external-controller-tls` and
 `secret` fields. These are Mihomo's [API connection settings](https://wiki.metacubex.one/config/general/#api).
@@ -93,7 +94,7 @@ the remote machine that uses it. To connect to a remote target, override the
 address while keeping the file's secret:
 
 ```console
-kami --mihomo-config ./remote-mihomo.yaml --controller http://192.0.2.10:9090
+kami -c ./remote-mihomo.yaml --controller http://192.0.2.10:9090
 ```
 
 The same precedence applies: flags > environment > selected file > defaults.
@@ -121,6 +122,20 @@ kami update 'Provider name'
 kami logs --level info
 kami --json traffic
 ```
+
+`status` lists each proxy group's current selection and samples one frame of
+Mihomo's live traffic stream for upload/download bytes per second. Its JSON
+output adds `selected` (group names mapped to node and `delay_ms`) and `traffic`
+(`up` and `down` in bytes per second). If the proxy or traffic endpoint is
+unavailable, the core status still prints and the affected section says so.
+
+`proxies` prints a tree of groups and their nodes, with the latest recorded
+latency and a `SELECTED` marker. It does not start delay tests. A group name
+search shows all its nodes; a node name search shows that node under each
+matching group. When stdout is a terminal, group names and selected node names
+use their latency color: green through 100 ms, yellow through 300 ms, red above
+300 ms, and gray when unknown. `NO_COLOR` disables color. `--json proxies`
+retains the raw proxy map for scripts.
 
 JSON responses are single objects, or one object per line for streams. Errors
 go to stderr. Exit codes: 0 success, 1 operation failure, 2 argument error,
@@ -201,7 +216,7 @@ show_process = true
 ```
 
 This controls display only; it does not enable process lookup in Mihomo. An
-explicit Mihomo YAML file replaces the kami TOML and uses the default columns.
+Mihomo YAML file uses the default columns.
 
 Mouse wheel scrolling moves through lists; clicking a log entry pauses follow.
 Click the operation message near the bottom to read its full result. Mouse

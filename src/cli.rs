@@ -49,6 +49,8 @@ pub enum Command {
     },
     /// Show core state, selected nodes and current network I/O
     Status,
+    /// Restart the Mihomo core through the controller API
+    Reboot,
     /// List proxies and groups
     Proxies {
         #[arg(long, default_value = "")]
@@ -189,6 +191,7 @@ impl Cli {
             Command::Status => {
                 return show_status(&backend, self.json).await;
             }
+            Command::Reboot => Operation::Reboot,
             Command::Proxies { search } => {
                 let raw = backend.get(&["proxies"]).await?;
                 let proxies = raw["proxies"]

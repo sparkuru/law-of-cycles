@@ -137,7 +137,7 @@ impl App {
             demo,
             endpoint,
             page: Page::Overview,
-            sidebar_focus: false,
+            sidebar_focus: true,
             group: None,
             query: String::new(),
             searching: false,

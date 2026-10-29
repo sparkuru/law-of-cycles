@@ -433,6 +433,56 @@ async fn executable_connects_using_mihomo_yaml_without_modifying_it() {
 }
 
 #[tokio::test]
+async fn executable_reboot_posts_to_controller_and_reports_failures() {
+    for status in [200, 204, 401, 500] {
+        let mut fixture = Fixture::new(vec![Reply {
+            status,
+            body: if status == 204 {
+                Vec::new()
+            } else if status == 200 {
+                serde_json::to_vec(&json!({"status":"ok"})).unwrap()
+            } else {
+                serde_json::to_vec(&json!({"message":"private-controller-error"})).unwrap()
+            },
+            headers: String::new(),
+        }])
+        .await;
+        let result = tokio::process::Command::new(env!("CARGO_BIN_EXE_kami"))
+            .args([
+                "--controller",
+                &fixture.url,
+                "--timeout",
+                "1",
+                "--json",
+                "reboot",
+            ])
+            .env("XDG_CONFIG_HOME", "/nonexistent-kami-test")
+            .env("KAMI_SECRET", "reboot-test-token")
+            .output()
+            .await
+            .unwrap();
+        let request = fixture.requests.recv().await.unwrap();
+        assert!(request.starts_with("POST /restart HTTP/1.1\r\n"));
+        assert!(request.contains("authorization: Bearer reboot-test-token"));
+        let body: serde_json::Value =
+            serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body, json!({"path":"","payload":""}));
+        let stderr = String::from_utf8(result.stderr).unwrap();
+        assert!(!stderr.contains("reboot-test-token"));
+        assert!(!stderr.contains("private-controller-error"));
+        if status < 300 {
+            assert!(result.status.success(), "{stderr}");
+            let output: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+            assert_eq!(output, json!({"reboot":"requested"}));
+        } else {
+            assert!(!result.status.success());
+            assert!(stderr.contains(&format!("HTTP {status}")), "{stderr}");
+            assert!(result.stdout.is_empty());
+        }
+    }
+}
+
+#[tokio::test]
 async fn controller_uses_bearer_auth_and_redacts_error_bodies() {
     let mut fixture = Fixture::new(vec![Reply::json(401, json!({"secret":"do-not-print"}))]).await;
     let error = fixture
@@ -898,7 +948,14 @@ async fn manual_latency_failure_does_not_show_stale_success() {
 async fn focus_indicator_and_row_highlight_follow_tab_and_search() {
     for width in [50, 120] {
         let (mut app, _) = demo().await;
-        app.change_page(Page::Proxies);
+        assert!(render(&mut app, width, 30).contains("FOCUS: NAVIGATION"));
+        app.key(key(KeyCode::Down));
+        assert_eq!(app.page, Page::Proxies);
+        app.key(key(KeyCode::Up));
+        assert_eq!(app.page, Page::Overview);
+        app.key(key(KeyCode::Down));
+        assert!(app.sidebar_focus);
+        app.key(key(KeyCode::Enter));
         let mut terminal = Terminal::new(TestBackend::new(width, 30)).unwrap();
         terminal.draw(|frame| ui::draw(frame, &mut app)).unwrap();
         let row = app.view.list;

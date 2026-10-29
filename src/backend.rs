@@ -259,6 +259,16 @@ impl Backend {
     }
     pub async fn execute(&self, operation: &Operation) -> Result<Value> {
         match operation {
+            Operation::Reboot => {
+                self.request(
+                    Method::POST,
+                    &["restart"],
+                    Some(json!({"path":"","payload":""})),
+                    &[],
+                )
+                .await?;
+                Ok(json!({"reboot":"requested"}))
+            }
             Operation::RefreshGroup(group) => self.refresh_group(group, None).await,
             Operation::Select { group, node } => {
                 let proxies = self.get(&["proxies"]).await?;

@@ -109,6 +109,7 @@ omit source excerpts to avoid exposing secrets.
 
 ```console
 kami status
+kami reboot
 kami --controller http://127.0.0.1:9090 --json status
 kami proxies --search Tokyo
 kami select 'Proxy' 'Node name'
@@ -146,10 +147,17 @@ Only `Selector` groups support selection in this release. Other groups remain
 visible and can be measured. Delay tests use
 `https://www.gstatic.com/generate_204` with a 5-second core timeout.
 
+`kami reboot` requests a Mihomo core restart through the configured controller's
+`POST /restart` API, using the same connection and authentication settings as
+other commands. Success acknowledges the request; it does not wait for the core
+to become available again. Use `kami status` to check it after restarting.
+
 ## TUI
 
-The sidebar contains the four pages. The focus strip explicitly names NAVIGATION,
-CONTENT or SEARCH. Tab switches navigation/content focus; the active area is
+The sidebar contains the four pages and has focus when the TUI opens. Use Up/Down
+or `j`/`k` to select a page, then Enter or Tab to focus its content.
+The focus strip explicitly names NAVIGATION, CONTENT or SEARCH.
+Tab switches navigation/content focus; the active area is
 highlighted and the inactive list selection is dimmed. The current page stays
 highlighted in navigation even when content has focus. Select an item to inspect it.
 Proxies show a list and right-hand inspector on wide terminals; drag their

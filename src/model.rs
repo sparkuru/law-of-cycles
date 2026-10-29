@@ -159,6 +159,7 @@ impl ServiceAction {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Operation {
+    Reboot,
     Select {
         group: String,
         node: String,
@@ -178,6 +179,7 @@ pub enum Operation {
 impl Operation {
     pub fn label(&self) -> String {
         match self {
+            Self::Reboot => "Restart Mihomo core".into(),
             Self::Select { group, node } => format!("Use {node} in {group}"),
             Self::Delay(node) => format!("Measure {node}"),
             Self::RefreshGroup(group) => format!("Refresh group {group}"),
@@ -191,7 +193,7 @@ impl Operation {
         }
     }
     pub fn needs_confirmation(&self) -> bool {
-        matches!(self, Self::Tun(_) | Self::Close(_))
+        matches!(self, Self::Reboot | Self::Tun(_) | Self::Close(_))
             || matches!(self, Self::Service { action, .. } if *action != ServiceAction::Status)
     }
 }

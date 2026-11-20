@@ -114,6 +114,8 @@ kami --controller http://127.0.0.1:9090 --json status
 kami proxies --search Tokyo
 kami select 'Proxy' 'Node name'
 kami delay 'Node name'
+kami ping www.google.com
+kami --json ping example.com --port 8443
 kami mode rule
 kami tun on
 kami connections
@@ -146,6 +148,41 @@ bodies or credentials. CLI commands use no automatic mutation retries.
 Only `Selector` groups support selection in this release. Other groups remain
 visible and can be measured. Delay tests use
 `https://www.gstatic.com/generate_204` with a 5-second core timeout.
+
+### Probe a destination's route
+
+`kami ping HOST` sends one TCP probe to port 443 through Mihomo's HTTP or mixed
+proxy listener. The target is a domain name or IP address, not a URL; `--port`
+selects another destination port. It prints the observed connection's rule,
+proxy chain in client-to-outbound order, and any matching live routing logs.
+`--json` returns one object with the same information; unavailable fields are
+`null` and missing logs are an empty array.
+On a terminal, colors highlight the connection, rule, route and log levels;
+`NO_COLOR` disables them. Redirected output and JSON contain no added colors.
+
+The listener port comes from the controller's current configuration, and its
+host defaults to the controller host. If the proxy listener is elsewhere, use
+`kami ping example.com --proxy http://127.0.0.1:7890`. This command currently
+supports unauthenticated HTTP/mixed listeners; HTTPS and SOCKS-only listeners
+and listeners requiring proxy authentication are not supported. The existing
+global `--timeout` (or configured timeout) bounds the probe, including its wait
+for connection and log observations.
+
+The command holds its proxy connection open and correlates controller records
+using source IP and port, protocol and destination. Logs are live and may be
+missed; a short-lived or failed connection may not appear in the active
+connection snapshot. NAT or an altered destination may prevent a reliable
+match. In these cases the result reports unavailable information instead of
+using another connection's records. The mode shown is sampled at the start.
+
+An accepted HTTP CONNECT means only that the proxy accepted the request: Mihomo
+can acknowledge it before attempting the outbound connection. Even an observed
+route does not prove TLS, HTTP or the destination service is working. Exit code
+0 means a connection and its route were observed and the route did not contain
+`REJECT` or `REJECT-DROP`; it does not assert destination reachability. Exit
+code 1 means the probe failed, was rejected, or its route could not be observed.
+Routing can also differ from a browser's request because the probe's process,
+inbound, port, protocol and other metadata can differ.
 
 `kami reboot` requests a Mihomo core restart through the configured controller's
 `POST /restart` API, using the same connection and authentication settings as

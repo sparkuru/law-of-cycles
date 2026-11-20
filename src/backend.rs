@@ -64,6 +64,9 @@ impl Backend {
     pub fn show_process(&self) -> bool {
         self.settings.connections.show_process
     }
+    pub(crate) fn timeout(&self) -> Duration {
+        self.settings.timeout
+    }
     pub async fn refresh_group(
         &self,
         group: &str,
@@ -396,7 +399,7 @@ impl Backend {
             backoff = (backoff * 2).min(15);
         }
     }
-    async fn stream_once(
+    pub(crate) async fn stream_once(
         &self,
         topic: Topic,
         level: &str,

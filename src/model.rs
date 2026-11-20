@@ -54,12 +54,14 @@ pub type Proxies = BTreeMap<String, Proxy>;
 pub struct Metadata {
     #[serde(default)]
     pub host: String,
-    #[serde(default)]
+    #[serde(rename = "destinationIP", alias = "destinationIp", default)]
     pub destination_ip: String,
     #[serde(default)]
     pub destination_port: String,
-    #[serde(default)]
+    #[serde(rename = "sourceIP", alias = "sourceIp", default)]
     pub source_ip: String,
+    #[serde(default)]
+    pub source_port: String,
     #[serde(default)]
     pub process: String,
     #[serde(default)]

@@ -1,4 +1,4 @@
-use crate::{backend::Backend, config::Settings, model::*, system, tui};
+use crate::{backend::Backend, config::Settings, model::*, ping, system, tui};
 use anyhow::{Context, Result, ensure};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
@@ -60,6 +60,14 @@ pub enum Command {
     Select { group: String, node: String },
     /// Measure one node's latency
     Delay { node: String },
+    /// Probe a TCP destination through Mihomo and report its route
+    Ping {
+        target: String,
+        #[arg(long, default_value_t = 443, value_parser = clap::value_parser!(u16).range(1..))]
+        port: u16,
+        #[arg(long, help = "HTTP proxy origin, overriding the discovered listener")]
+        proxy: Option<String>,
+    },
     /// Change runtime routing mode
     Mode {
         #[arg(value_enum)]
@@ -219,6 +227,20 @@ impl Cli {
             }
             Command::Select { group, node } => Operation::Select { group, node },
             Command::Delay { node } => Operation::Delay(node),
+            Command::Ping {
+                target,
+                port,
+                proxy,
+            } => {
+                let report = ping::probe(&backend, &target, port, proxy.as_deref()).await?;
+                show_ping(&report, self.json)?;
+                ensure!(report.route_observed(), "Probe route could not be observed");
+                ensure!(
+                    !report.rejected(),
+                    "Probe was rejected by the observed route"
+                );
+                return Ok(());
+            }
             Command::Mode { value } => Operation::Mode(value),
             Command::Tun { value } => Operation::Tun(matches!(value, Toggle::On)),
             Command::Close { connection_id } => Operation::Close(connection_id),
@@ -235,6 +257,125 @@ impl Cli {
         };
         emit(backend.execute(&operation).await?, self.json)
     }
+}
+
+fn show_ping(report: &ping::Report, machine: bool) -> Result<()> {
+    if machine {
+        return emit(serde_json::to_value(report)?, true);
+    }
+    let color = io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+    for row in ping_lines(report, color) {
+        line(&row)?;
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum Tone {
+    Red = 31,
+    Green = 32,
+    Yellow = 33,
+    Cyan = 36,
+    Muted = 90,
+}
+
+fn tint(text: &str, tone: Tone, enabled: bool) -> String {
+    let text = clean(text);
+    if enabled {
+        format!("\u{1b}[{}m{text}\u{1b}[0m", tone as u8)
+    } else {
+        text
+    }
+}
+
+fn ping_lines(report: &ping::Report, color: bool) -> Vec<String> {
+    let mut rows = vec![format!(
+        "target: {}:{} (TCP)",
+        tint(&report.target, Tone::Cyan, color),
+        report.port
+    )];
+    rows.push(format!("proxy: {}", clean(&report.proxy)));
+    rows.push(format!("mode at start: {}", clean(&report.mode_at_start)));
+    rows.push(format!(
+        "proxy CONNECT: {} (destination not verified)",
+        tint(report.proxy_connect, Tone::Cyan, color)
+    ));
+    let observation_tone = if report.observation == "observed" {
+        Tone::Green
+    } else {
+        Tone::Yellow
+    };
+    rows.push(format!(
+        "connection: {}",
+        tint(report.observation, observation_tone, color)
+    ));
+    if let Some(id) = &report.connection_id {
+        rows.push(format!("connection ID: {}", clean(id)));
+    }
+    match &report.rule {
+        Some(rule) if rule.payload.is_empty() => {
+            rows.push(format!("rule: {}", tint(&rule.kind, Tone::Cyan, color)))
+        }
+        Some(rule) => rows.push(format!(
+            "rule: {} ({})",
+            tint(&rule.kind, Tone::Cyan, color),
+            clean(&rule.payload)
+        )),
+        None => rows.push(format!("rule: {}", tint("unavailable", Tone::Muted, color))),
+    }
+    match &report.route {
+        Some(route) => rows.push(format!(
+            "route: {}",
+            route
+                .iter()
+                .map(|part| {
+                    let tone = if part.eq_ignore_ascii_case("REJECT")
+                        || part.eq_ignore_ascii_case("REJECT-DROP")
+                    {
+                        Tone::Red
+                    } else if part.eq_ignore_ascii_case("DIRECT") {
+                        Tone::Green
+                    } else {
+                        Tone::Cyan
+                    };
+                    tint(part, tone, color)
+                })
+                .collect::<Vec<_>>()
+                .join(" > ")
+        )),
+        None => rows.push(format!(
+            "route: {}",
+            tint("unavailable", Tone::Muted, color)
+        )),
+    }
+    if report.logs.is_empty() {
+        rows.push(format!(
+            "logs: {}",
+            tint("no matching routing log observed", Tone::Muted, color)
+        ));
+    } else {
+        rows.push("logs:".into());
+        for log in &report.logs {
+            let tone = match log.level.to_ascii_lowercase().as_str() {
+                "error" => Tone::Red,
+                "warning" | "warn" => Tone::Yellow,
+                "info" => Tone::Cyan,
+                _ => Tone::Muted,
+            };
+            rows.push(format!(
+                "  [{}] {}",
+                tint(&log.level, tone, color),
+                clean(&log.payload)
+            ));
+        }
+    }
+    if let Some(error) = &report.log_error {
+        rows.push(format!("log stream: {}", tint(error, Tone::Red, color)));
+    }
+    if let Some(error) = &report.connection_error {
+        rows.push(format!("connections: {}", tint(error, Tone::Red, color)));
+    }
+    rows
 }
 #[derive(Serialize)]
 struct SelectedNode {
@@ -465,6 +606,48 @@ async fn follow(backend: Backend, topic: Topic, level: String, machine: bool) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ping_colors_distinguish_route_and_warning_without_trusting_terminal_controls() {
+        let mut report = ping::Report {
+            target: "example.com".into(),
+            port: 443,
+            network: "tcp",
+            proxy: "http://127.0.0.1:7890/".into(),
+            mode_at_start: "rule".into(),
+            proxy_connect: "accepted",
+            observation: "observed",
+            connection_id: Some("probe-id".into()),
+            rule: Some(ping::MatchedRule {
+                kind: "DomainSuffix".into(),
+                payload: "example.com".into(),
+            }),
+            route: Some(vec!["Proxy".into(), "REJECT".into()]),
+            logs: vec![Log {
+                level: "warning".into(),
+                payload: "unsafe\u{1b}[31mtext".into(),
+            }],
+            log_error: None,
+            connection_error: None,
+        };
+        let colored = ping_lines(&report, true).join("\n");
+        assert!(colored.contains("\u{1b}[32mobserved\u{1b}[0m"));
+        assert!(colored.contains("\u{1b}[31mREJECT\u{1b}[0m"));
+        assert!(colored.contains("\u{1b}[33mwarning\u{1b}[0m"));
+        assert!(!colored.contains("unsafe\u{1b}[31mtext"));
+
+        let plain = ping_lines(&report, false).join("\n");
+        assert!(plain.contains("route: Proxy > REJECT"));
+        assert!(plain.contains("[warning] unsafe [31mtext"));
+        assert!(!plain.contains('\u{1b}'));
+
+        report.observation = "unavailable";
+        report.route = None;
+        let missing = ping_lines(&report, true).join("\n");
+        assert!(missing.contains("connection: \u{1b}[33munavailable\u{1b}[0m"));
+        assert!(missing.contains("route: \u{1b}[90munavailable\u{1b}[0m"));
+    }
+
     #[test]
     fn proxy_tree_shows_group_context_latency_and_selection() {
         let proxies: Proxies = serde_json::from_value(json!({
